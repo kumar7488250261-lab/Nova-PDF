@@ -1,0 +1,110 @@
+name: PDFNova APK Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'gradle/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Validate Gradle Wrapper
+        run: |
+          if [ ! -f "gradlew" ]; then
+            echo "::error::Gradle Wrapper is missing. Generate/commit the Gradle Wrapper before running the GitHub APK workflow."
+            exit 1
+          fi
+          chmod +x gradlew
+
+      - name: Prepare build environment
+        run: |
+          # Ensure .env exists so secrets plugin succeeds
+          if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env
+          fi
+          
+          # Restore debug.keystore if base64 file exists, or generate one
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            echo "Restoring debug.keystore from repository base64 asset..."
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            echo "Generating fallback debug keystore..."
+            keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Locate and validate APK
+        id: validate_apk
+        run: |
+          APK_FILE=$(find app/build/outputs/apk/ -type f -name "*.apk" | head -n 1)
+          
+          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
+            echo "::error::Build failed to generate an APK file under app/build/outputs/apk/"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(wc -c < "$APK_FILE" | tr -d ' ')
+          if [ "$FILE_SIZE" -le 0 ]; then
+            echo "::error::Generated APK file is empty (0 bytes)"
+            exit 1
+          fi
+          
+          # Copy to designated artifact name without modifying original output
+          cp "$APK_FILE" PDFNova-debug.apk
+          HUMAN_SIZE=$(ls -lh PDFNova-debug.apk | awk '{print $5}')
+          
+          echo "===================================="
+          echo "PDFNova APK BUILD SUCCESSFUL"
+          echo ""
+          echo "APK:"
+          echo "PDFNova-debug.apk"
+          echo ""
+          echo "Application ID:"
+          echo "com.aistudio.pdfnova.app"
+          echo ""
+          echo "Build type:"
+          echo "Debug"
+          echo ""
+          echo "Size:"
+          echo "$HUMAN_SIZE ($FILE_SIZE bytes)"
+          echo "===================================="
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFNova-debug-apk
+          path: PDFNova-debug.apk
+          if-no-files-found: error
+          retention-days: 14

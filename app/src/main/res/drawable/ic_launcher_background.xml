@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Official PDFNova brand background: Deep blue-to-purple gradient -->
+    <path
+        android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="10"
+                android:startY="10"
+                android:endX="98"
+                android:endY="98"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#2563EB" />
+                <item android:offset="0.4" android:color="#3B82F6" />
+                <item android:offset="0.75" android:color="#4F46E5" />
+                <item android:offset="1.0" android:color="#1E1B4B" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Subtle luminous ambient radial glow -->
+    <path
+        android:pathData="M54,18 A36,36 0 1 0 54,90 A36,36 0 1 0 54,18 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="54"
+                android:startY="18"
+                android:endX="54"
+                android:endY="90"
+                android:type="radial"
+                android:gradientRadius="36">
+                <item android:offset="0.0" android:color="#40818CF8" />
+                <item android:offset="1.0" android:color="#00000000" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

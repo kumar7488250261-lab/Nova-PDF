@@ -1,0 +1,6 @@
+{
+  "name": "PDFNova",
+  "description": "One App. Every PDF Tool. 33 powerful PDF utilities to merge, split, compress, edit, convert, sign, protect and analyze documents.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
