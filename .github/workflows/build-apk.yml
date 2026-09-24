@@ -7,104 +7,249 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-apk:
-    name: Build Debug APK
+  build-and-publish:
+    name: Build and Publish Debug APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17 (Temurin)
+      - name: Set up Temurin Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Verify Java environment
+        run: |
+          echo "=== Java Environment Details ==="
+          java -version
+          echo "JAVA_HOME is: ${JAVA_HOME}"
+          
+          if [ -z "${JAVA_HOME}" ] || [ ! -d "${JAVA_HOME}" ]; then
+            echo "::error::JAVA_HOME is not set or directory does not exist."
+            exit 1
+          fi
 
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
+          # Detect active Java major version
+          JAVA_VER_STR=$(java -version 2>&1 | head -n 1)
+          echo "Raw version string: ${JAVA_VER_STR}"
+          
+          # Extracts major version: e.g. "17.0.x" -> 17, "21.0.x" -> 21
+          JAVA_MAJOR=$(echo "$JAVA_VER_STR" | sed -E 's/.*version "([0-9]+).*/\1/')
+          
+          if ! [[ "$JAVA_MAJOR" =~ ^[0-9]+$ ]]; then
+            echo "::error::Failed to detect Java major version from string: ${JAVA_VER_STR}"
+            exit 1
+          fi
+
+          echo "Detected Java Major Version: ${JAVA_MAJOR}"
+          
+          if [ "$JAVA_MAJOR" -lt 17 ]; then
+            echo "::error::Active Java version ($JAVA_MAJOR) is lower than the required Java 17."
+            exit 1
+          fi
+          echo "Java environment verification successful: Java $JAVA_MAJOR satisfies the requirement (>= 17)."
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'gradle/libs.versions.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          gradle-version: '9.3.1'
 
-      - name: Validate Gradle Wrapper
+      - name: Create temporary debug keystore
         run: |
-          if [ ! -f "gradlew" ]; then
-            echo "::error::Gradle Wrapper is missing. Generate/commit the Gradle Wrapper before running the GitHub APK workflow."
+          if [ -f "./debug.keystore" ]; then
+            echo "Existing ./debug.keystore detected. Reusing existing keystore."
+          else
+            echo "Generating temporary debug keystore..."
+            keytool -genkeypair \
+              -keystore ./debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+
+            if [ ! -f "./debug.keystore" ]; then
+              echo "::error::Failed to generate ./debug.keystore."
+              exit 1
+            fi
+            echo "Temporary debug keystore created successfully."
+          fi
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Verify APK
+        id: verify_apk
+        run: |
+          EXPECTED_APK="app/build/outputs/apk/debug/app-debug.apk"
+          
+          if [ ! -f "$EXPECTED_APK" ]; then
+            echo "::error::Expected debug APK not found at: $EXPECTED_APK"
+            echo "Searching app/build/outputs/apk for generated APK files..."
+            if [ -d "app/build/outputs/apk" ]; then
+              find app/build/outputs/apk -type f -name "*.apk"
+            else
+              echo "Directory app/build/outputs/apk does not exist."
+            fi
             exit 1
           fi
-          chmod +x gradlew
 
-      - name: Prepare build environment
-        run: |
-          # Ensure .env exists so secrets plugin succeeds
-          if [ ! -f .env ] && [ -f .env.example ]; then
-            cp .env.example .env
-          fi
-          
-          # Restore debug.keystore if base64 file exists, or generate one
-          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
-            echo "Restoring debug.keystore from repository base64 asset..."
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
-            echo "Generating fallback debug keystore..."
-            keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
-
-      - name: Locate and validate APK
-        id: validate_apk
-        run: |
-          APK_FILE=$(find app/build/outputs/apk/ -type f -name "*.apk" | head -n 1)
-          
-          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
-            echo "::error::Build failed to generate an APK file under app/build/outputs/apk/"
+          # Confirm regular file
+          if [ ! -f "$EXPECTED_APK" ]; then
+            echo "::error::$EXPECTED_APK is not a regular file."
             exit 1
           fi
-          
-          FILE_SIZE=$(wc -c < "$APK_FILE" | tr -d ' ')
-          if [ "$FILE_SIZE" -le 0 ]; then
-            echo "::error::Generated APK file is empty (0 bytes)"
+
+          # Confirm not empty
+          APK_SIZE=$(wc -c < "$EXPECTED_APK" | tr -d ' ')
+          if [ "$APK_SIZE" -le 0 ]; then
+            echo "::error::$EXPECTED_APK is empty (0 bytes)."
             exit 1
           fi
-          
-          # Copy to designated artifact name without modifying original output
-          cp "$APK_FILE" PDFNova-debug.apk
-          HUMAN_SIZE=$(ls -lh PDFNova-debug.apk | awk '{print $5}')
-          
-          echo "===================================="
-          echo "PDFNova APK BUILD SUCCESSFUL"
-          echo ""
-          echo "APK:"
-          echo "PDFNova-debug.apk"
-          echo ""
-          echo "Application ID:"
-          echo "com.aistudio.pdfnova.app"
-          echo ""
-          echo "Build type:"
-          echo "Debug"
-          echo ""
-          echo "Size:"
-          echo "$HUMAN_SIZE ($FILE_SIZE bytes)"
-          echo "===================================="
 
-      - name: Upload APK artifact
+          # Confirm extension
+          case "$EXPECTED_APK" in
+            *.apk) ;;
+            *) echo "::error::$EXPECTED_APK does not have .apk extension."; exit 1 ;;
+          esac
+
+          echo "APK successfully verified:"
+          echo "Path: $EXPECTED_APK"
+          echo "Size: $(ls -lh "$EXPECTED_APK" | awk '{print $5}') ($APK_SIZE bytes)"
+          echo "apk_path=$EXPECTED_APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PDFNova-debug-apk
-          path: PDFNova-debug.apk
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 14
+
+      - name: Prepare APK release asset
+        id: prepare_asset
+        run: |
+          TMP_RELEASE_DIR=$(mktemp -d -t apk-release-XXXXXX)
+          
+          # Sanitize repository name: strip owner, lowercase, keep only alphanumeric, dots, dashes
+          REPO_NAME=$(echo "${{ github.repository }}" | awk -F'/' '{print $2}' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
+          if [ -z "$REPO_NAME" ]; then
+            REPO_NAME="pdfnova"
+          fi
+          
+          ASSET_NAME="${REPO_NAME}-debug-build-${{ github.run_number }}.apk"
+          ASSET_PATH="${TMP_RELEASE_DIR}/${ASSET_NAME}"
+          
+          # Copy verified APK to sanitized filename in temp directory
+          cp "app/build/outputs/apk/debug/app-debug.apk" "$ASSET_PATH"
+          
+          if [ ! -f "$ASSET_PATH" ] || [ ! -s "$ASSET_PATH" ]; then
+            echo "::error::Failed to prepare release asset at $ASSET_PATH"
+            exit 1
+          fi
+          
+          echo "Prepared release asset: $ASSET_NAME at $ASSET_PATH"
+          echo "asset_path=$ASSET_PATH" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to GitHub Releases
+        id: publish_release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh --version
+          
+          ASSET_PATH="${{ steps.prepare_asset.outputs.asset_path }}"
+          ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
+          
+          if [ -z "$ASSET_PATH" ] || [ ! -f "$ASSET_PATH" ] || [ ! -s "$ASSET_PATH" ]; then
+            echo "::error::Release asset is invalid or does not exist."
+            exit 1
+          fi
+          
+          RELEASE_TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
+          RELEASE_TITLE="Debug APK Build #${{ github.run_number }}"
+          
+          RELEASE_NOTES=$(cat <<EOF
+          ### PDFNova Debug APK Build
+          
+          This is an automatically generated debug APK built by GitHub Actions.
+          
+          - **Run Number:** ${{ github.run_number }}
+          - **Run Attempt:** ${{ github.run_attempt }}
+          - **Commit SHA:** \`${{ github.sha }}\`
+          - **Build Type:** Debug
+          
+          > **Notice:** This APK is intended for testing and verification purposes. It is signed with a temporary debug keystore and is **not** a Google Play Store production release.
+          EOF
+          )
+
+          echo "Creating GitHub Release with tag: $RELEASE_TAG"
+          gh release create "$RELEASE_TAG" "$ASSET_PATH" \
+            --title "$RELEASE_TITLE" \
+            --notes "$RELEASE_NOTES" \
+            --target "${{ github.sha }}" \
+            --latest
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Report APK download result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_STATUS="${{ steps.publish_release.outcome }}"
+          RELEASE_TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
+          RELEASE_TITLE="Debug APK Build #${{ github.run_number }}"
+          ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
+          REPO="${{ github.repository }}"
+          
+          echo "=================================================="
+          echo "PDFNova APK Build Summary"
+          echo "=================================================="
+          
+          if [ "$RELEASE_STATUS" = "success" ]; then
+            RELEASE_URL="https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
+            echo "GitHub Release published successfully!"
+            echo "Release Tag: ${RELEASE_TAG}"
+            echo "Release Title: ${RELEASE_TITLE}"
+            echo "Release URL: ${RELEASE_URL}"
+            echo "APK Asset Name: ${ASSET_NAME}"
+            
+            # View release with GitHub CLI
+            gh release view "$RELEASE_TAG" || true
+            
+            cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ##  PDFNova APK Build & Release Succeeded
+          
+          ###  Download from GitHub Release
+          - **Release:** [${RELEASE_TITLE}](${RELEASE_URL})
+          - **Tag:** \`${RELEASE_TAG}\`
+          - **Direct Download Asset:** \`${ASSET_NAME}\` (under the **Assets** section of the release)
+          
+          ###  Backup Actions Artifact
+          - The standard GitHub Actions artifact **\`app-debug-apk\`** is also available on this workflow run summary page.
+          EOF
+          else
+            echo "::warning::GitHub Release publishing was not completed or encountered an error."
+            echo "The APK was successfully built and is safely preserved as an Actions artifact."
+            echo "Artifact Name: app-debug-apk (contains app-debug.apk)"
+            
+            cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## ⚠️ PDFNova APK Build Completed
+          
+          - **APK Build Status:**  SUCCESS
+          - **Actions Artifact:**  **\`app-debug-apk\`** (available on this workflow run summary page)
+          - **Release Publishing:** ⚠️ Release creation did not complete or was skipped. Your APK remains completely safe and accessible via the Actions Artifacts section above.
+          EOF
+          fi
+          echo "=================================================="
